@@ -1,0 +1,7 @@
+# never commit anything credential-shaped
+.aws/
+*credentials*
+*.pem
+*.key
+.env
+.env.*
