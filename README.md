@@ -103,6 +103,9 @@ install -m 755 awsp/awsp ~/bin/awsp     # any directory on your PATH
 Requires the AWS CLI v2 (2.9 or newer, for `aws configure export-credentials`) and
 python3, which macOS already has.
 
+New machine, or no profiles yet? [SETUP.md](SETUP.md) walks through both ways of adding
+an account: IAM Identity Center, and access keys with or without a session token.
+
 ## Why not `export AWS_PROFILE`?
 
 That only affects the terminal you ran it in. A new tab, a task launched from your
