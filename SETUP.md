@@ -16,12 +16,25 @@ on path B.
 
 ## Install once
 
+Copy the whole block. It works from any directory, creates `~/bin` if it is missing, and
+reloads your PATH so `awsp` is found without opening a new terminal.
+
 ```sh
 brew install awscli jq
-git clone https://github.com/bharatkvanapalli/awsp.git
-install -m 755 awsp/awsp ~/bin/awsp
+git clone https://github.com/bharatkvanapalli/awsp.git ~/awsp
+mkdir -p ~/bin
+install -m 755 ~/awsp/awsp ~/bin/awsp
 grep -q 'HOME/bin' ~/.zshrc || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+exec zsh
 ```
+
+Then `awsp --help` should print the usage. Two things go wrong on a fresh machine:
+
+- **`install: awsp/awsp: No such file or directory`** means the clone did not land where
+  the next line looked. The block above clones to `~/awsp` and installs from there, so
+  the two always agree.
+- **`zsh: command not found: awsp`** means `~/bin` is not on your PATH yet. `exec zsh`
+  fixes it in the current terminal; on bash use `~/.bashrc` and `exec bash`.
 
 Two files hold every setting:
 

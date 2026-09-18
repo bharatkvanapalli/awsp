@@ -30,13 +30,24 @@ default -> acme-qa  sso 210987654321
 
 ## Install
 
+Copy all five lines. They work from any directory, and the last one reloads your PATH so
+`awsp` is found in the terminal you are already in.
+
 ```sh
-git clone https://github.com/bharatkvanapalli/awsp.git
-install -m 755 awsp/awsp ~/bin/awsp     # any directory on your PATH
+git clone https://github.com/bharatkvanapalli/awsp.git ~/awsp
+mkdir -p ~/bin
+install -m 755 ~/awsp/awsp ~/bin/awsp
+grep -q 'HOME/bin' ~/.zshrc || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+exec zsh
 ```
 
+Check it with `awsp --help`. If that says `command not found`, `~/bin` is not on your
+PATH: run `echo $PATH | tr ':' '\n' | grep bin` to see. On bash, use `~/.bashrc` in place
+of `~/.zshrc` and `exec bash` at the end.
+
 Requires the AWS CLI v2 (2.9 or newer, for `aws configure export-credentials`) and
-python3, which macOS already has.
+python3, which macOS already has. `git clone` fails if `~/awsp` already exists; either
+pull there instead, or clone somewhere else and adjust the `install` line.
 
 ## Commands
 
