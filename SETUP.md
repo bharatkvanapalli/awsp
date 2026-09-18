@@ -1,8 +1,18 @@
 # Setting up AWS accounts on a new machine
 
-Two ways to reach an AWS account from the command line: IAM Identity Center, which hands
-out credentials that expire, and access keys, which do not. This page covers both, plus
-how to switch between them with `awsp`. Nothing here needs copying from an old machine.
+Two ways to reach an AWS account from the command line. This page covers both, plus how
+to switch between them with `awsp`. Nothing here needs copying from an old machine.
+
+| | Path A: Identity Center | Path B: access keys |
+|---|---|---|
+| Use when | The account has a sign-in portal | You were handed a key, or the account has no portal |
+| You store | No secret at all | A key and secret, sometimes a session token |
+| Lifetime | Expires, renewed by signing in | Permanent, or minutes to hours when temporary |
+| Daily cost | One `aws sso login` | Nothing, until a key needs rotating |
+| Setup below | [Path A](#path-a-iam-identity-center) | [Path B](#path-b-access-keys-with-or-without-a-session-token) |
+
+Mixing both is normal: environment accounts on path A, a client's or a personal account
+on path B.
 
 ## Install once
 
