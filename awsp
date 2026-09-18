@@ -1,122 +1,247 @@
 #!/usr/bin/env bash
-# awsp — switch the GLOBAL default AWS profile.
+# awsp — point the GLOBAL default AWS profile at one of your named profiles.
 #
-#   awsp                  show which account is currently default, and list profiles
+#   awsp                  show the current default and list every profile
 #   awsp <profile>        make <profile> the default, for every terminal and tool
-#   awsp -l | --list      list profiles only
-#   awsp -c | --clear     remove the default profile (forces explicit --profile)
+#   awsp <substring>      the same, when exactly one profile name matches
+#   awsp -l | --list      list profile names only
+#   awsp -i | --login     sign in to the IAM Identity Center session of the default
+#   awsp -c | --clear     remove the default, so every command needs --profile
+#   awsp -h | --help      this text
 #
-# This copies the named profile's credentials into the [default] section of
-# ~/.aws/credentials, so the change is global and persistent — unlike
-# `export AWS_PROFILE=...`, which only affects the terminal you ran it in.
-# Named profiles are never modified or removed.
+# The default is written as a credential_process that defers to the chosen profile,
+# so NO credentials are ever copied. IAM Identity Center (SSO), assume-role and
+# access-key profiles all work, and short-lived credentials stay short-lived.
+# Named profiles are never modified; the config file is backed up before a change.
 set -uo pipefail
 
-CRED="$HOME/.aws/credentials"
-CONF="$HOME/.aws/config"
+CONF="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+CRED="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
 SELF=$(basename "$0")
 
 bold=$'\033[1m'; dim=$'\033[2m'; grn=$'\033[32m'; ylw=$'\033[33m'; red=$'\033[31m'; rst=$'\033[0m'
 
 die() { printf "%s%s%s\n" "$red" "$1" "$rst" >&2; exit 1; }
 
-# Named profiles = everything except 'default'
+# Named profiles = everything except 'default'.
 list_named() { aws configure list-profiles 2>/dev/null | grep -vx default; }
 
-key_of() { aws configure get aws_access_key_id --profile "$1" 2>/dev/null; }
+# One config value of one profile, empty when unset.
+get() { aws configure get "$2" --profile "$1" 2>/dev/null; }
 
-# Which named profile does [default] currently mirror? Matched by access key id,
-# so no extra state file has to be kept in sync.
-current_name() {
-  local dk; dk=$(key_of default)
-  [ -z "$dk" ] && { echo ""; return; }
+# Optional short name for a profile, set once with:
+#   aws configure set awsp_alias prod --profile very-long-profile-name
+alias_of() { get "$1" awsp_alias; }
+
+# The profile whose alias is exactly $1, empty when none matches.
+by_alias() {
   local p
   while IFS= read -r p; do
-    [ "$(key_of "$p")" = "$dk" ] && { echo "$p"; return; }
+    [ -z "$p" ] && continue
+    [ "$(alias_of "$p")" = "$1" ] && { echo "$p"; return; }
   done < <(list_named)
-  echo "?"
+  echo ""
 }
 
-whoami_for() {
-  aws sts get-caller-identity --profile "$1" --output text \
-      --query '[Account,Arn]' 2>/dev/null \
-    | sed 's|arn:aws:iam::[0-9]*:user/| |'
+# How a profile gets its credentials, for the listing.
+kind_of() {
+  local p="$1"
+  if [ -n "$(get "$p" sso_session)" ] || [ -n "$(get "$p" sso_account_id)" ]; then echo "sso"
+  elif [ -n "$(get "$p" role_arn)" ]; then echo "role"
+  elif [ -n "$(get "$p" credential_process)" ]; then echo "process"
+  elif [ -n "$(get "$p" aws_access_key_id)" ]; then echo "keys"
+  else echo "-"; fi
 }
+
+# Account id without an API call: from the SSO settings, or out of the role ARN.
+acct_of() {
+  local p="$1" v
+  v=$(get "$p" sso_account_id); [ -n "$v" ] && { echo "$v"; return; }
+  v=$(get "$p" role_arn)
+  case "$v" in arn:aws:iam::*) echo "$v" | cut -d: -f5 ;; *) echo "" ;; esac
+}
+
+# Which profile does [default] point at? Parsed back out of the credential_process line,
+# so awsp keeps no state of its own.
+current_name() {
+  local cp
+  cp=$(get default credential_process)
+  case "$cp" in
+    *--profile*) echo "$cp" | sed -n 's/.*--profile \([^ ][^ ]*\).*/\1/p'; return ;;
+  esac
+  [ -n "$(get default aws_access_key_id)" ] && { echo "(copied access keys)"; return; }
+  echo ""
+}
+
+# The session an SSO profile signs in through; empty for other kinds.
+session_of() { get "$1" sso_session; }
+
+warn_shadow() {
+  if [ -f "$CRED" ] && grep -q '^\[default\]' "$CRED"; then
+    printf "%s! [default] in %s holds credentials and takes precedence over the profile you pick.%s\n" "$ylw" "$CRED" "$rst" >&2
+    printf "%s  run '%s --clear' to remove it, then pick a profile again.%s\n" "$dim" "$SELF" "$rst" >&2
+  fi
+  if [ -n "${AWS_PROFILE:-}" ]; then
+    printf "%s! AWS_PROFILE=%s is set in this shell and overrides the default here.%s\n" "$ylw" "$AWS_PROFILE" "$rst" >&2
+    printf "%s  run 'unset AWS_PROFILE' for the default to take effect in this terminal.%s\n" "$dim" "$rst" >&2
+  fi
+}
+
+identity() { aws sts get-caller-identity --output text --query '[Account,Arn]' 2>&1; }
 
 show() {
-  local cur; cur=$(current_name)
+  local cur ident
+  cur=$(current_name)
   printf "\n%sdefault%s -> " "$bold" "$rst"
   if [ -z "$cur" ]; then
-    printf "%s(not set — every command needs --profile)%s\n" "$dim" "$rst"
+    printf "%s(not set, every command needs --profile)%s\n" "$dim" "$rst"
   else
-    printf "%s%s%s   %s\n" "$grn" "$cur" "$rst" "$(whoami_for default)"
+    printf "%s%s%s\n" "$grn" "$cur" "$rst"
+    ident=$(identity)
+    case "$ident" in
+      *rror*|*xpired*|*nable*|*ailed*)
+        printf "  %s%s%s\n" "$red" "$(printf '%s' "$ident" | head -2 | tr '\n' ' ')" "$rst"
+        printf "  %srun '%s --login' if the sign-in has expired%s\n" "$dim" "$SELF" "$rst" ;;
+      *) printf "  %s\n" "$ident" ;;
+    esac
   fi
   printf "\n%sprofiles%s\n" "$bold" "$rst"
-  local p
+  local p mark alias
   while IFS= read -r p; do
-    local mark="  "; [ "$p" = "$cur" ] && mark="${grn}* ${rst}"
-    printf "  %s%-18s %s\n" "$mark" "$p" "$(whoami_for "$p")"
+    [ -z "$p" ] && continue
+    mark="  "; [ "$p" = "$cur" ] && mark="${grn}* ${rst}"
+    alias=$(alias_of "$p")
+    printf "  %s%-10s %-24s %-8s %s\n" "$mark" "$alias" "$p" "$(kind_of "$p")" "$(acct_of "$p")"
   done < <(list_named)
-  if [ -n "${AWS_PROFILE:-}" ]; then
-    printf "\n%s! AWS_PROFILE=%s is set in this shell and OVERRIDES the default.%s\n" \
-      "$ylw" "$AWS_PROFILE" "$rst"
-    printf "%s  run 'unset AWS_PROFILE' for the default to take effect here.%s\n" "$dim" "$rst"
+  warn_shadow
+  printf "\n%susage: %s <profile> | %s --login | %s --clear%s\n\n" "$dim" "$SELF" "$SELF" "$SELF" "$rst"
+}
+
+# Rewrite only the [default] section, leaving every other byte of the file alone.
+write_default() {
+  local target="$1" region="$2" output="$3"
+  cp "$CONF" "$CONF.bak-awsp" 2>/dev/null
+  python3 - "$CONF" "$target" "$region" "$output" <<'PY'
+import os, re, sys
+conf, target, region, output = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+text = open(conf).read() if os.path.exists(conf) else ""
+kept, skipping = [], False
+for line in text.splitlines(True):
+    if re.match(r"\s*\[", line):
+        skipping = re.match(r"\s*\[default\]\s*$", line) is not None
+        if skipping:
+            continue
+    if skipping:
+        continue
+    kept.append(line)
+body = "".join(kept).strip("\n")
+block = (
+    "[default]\n"
+    "# written by awsp: mirrors profile '%s'. No credentials are copied.\n"
+    "credential_process = aws configure export-credentials --profile %s --format process\n"
+    "region = %s\n"
+    "output = %s\n" % (target, target, region, output)
+)
+open(conf, "w").write(block + ("\n" + body + "\n" if body else ""))
+PY
+}
+
+remove_default() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  cp "$file" "$file.bak-awsp"
+  python3 - "$file" <<'PY'
+import re, sys
+path = sys.argv[1]
+kept, skipping = [], False
+for line in open(path).read().splitlines(True):
+    if re.match(r"\s*\[", line):
+        skipping = re.match(r"\s*\[default\]\s*$", line) is not None
+        if skipping:
+            continue
+    if skipping:
+        continue
+    kept.append(line)
+open(path, "w").write("".join(kept).lstrip("\n"))
+PY
+}
+
+do_login() {
+  local cur session
+  cur=$(current_name)
+  [ -n "$cur" ] || die "no default set; run '$SELF <profile>' first"
+  session=$(session_of "$cur")
+  if [ -n "$session" ]; then
+    printf "%saws sso login --sso-session %s%s\n" "$dim" "$session" "$rst"
+    aws sso login --sso-session "$session"
+  elif [ -n "$(get "$cur" sso_start_url)" ]; then
+    printf "%saws sso login --profile %s%s\n" "$dim" "$cur" "$rst"
+    aws sso login --profile "$cur"
+  else
+    die "profile '$cur' does not use IAM Identity Center; nothing to sign in to"
   fi
-  printf "\n%susage: %s <profile> | %s --clear%s\n\n" "$dim" "$SELF" "$SELF" "$rst"
 }
 
 command -v aws >/dev/null || die "aws CLI not found"
-[ -f "$CRED" ] || die "no $CRED"
+command -v python3 >/dev/null || die "python3 not found"
 
 case "${1:-}" in
-  ""|-s|--show)  show; exit 0 ;;
-  -l|--list)     list_named; exit 0 ;;
-  -h|--help)     sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  ""|-s|--show) show; exit 0 ;;
+  -l|--list)    list_named; exit 0 ;;
+  -i|--login)   do_login; exit $? ;;
+  -h|--help)    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   -c|--clear)
-      cp "$CRED" "$CRED.bak-awsp"
-      python3 - "$CRED" "$CONF" <<'PY'
-import configparser, sys, os
-cred, conf = sys.argv[1], sys.argv[2]
-c = configparser.RawConfigParser(); c.read(cred)
-if c.has_section("default"): c.remove_section("default")
-with open(cred, "w") as f: c.write(f)
-if os.path.exists(conf):
-    k = configparser.RawConfigParser(); k.read(conf)
-    if k.has_section("default"): k.remove_section("default")
-    with open(conf, "w") as f: k.write(f)
-PY
-      printf "%sdefault cleared%s — commands now require --profile (backup: %s.bak-awsp)\n" \
-        "$grn" "$rst" "$CRED"
+      remove_default "$CONF"
+      remove_default "$CRED"
+      printf "%sdefault cleared%s, commands now need --profile (backups: *.bak-awsp)\n" "$grn" "$rst"
       exit 0 ;;
 esac
 
+# Resolve the argument: exact profile name, then an alias, then a unique substring.
 TARGET="$1"
-list_named | grep -qx "$TARGET" || {
-  printf "%sno such profile: %s%s\n" "$red" "$TARGET" "$rst" >&2
-  printf "available: %s\n" "$(list_named | tr '\n' ' ')" >&2
-  exit 1
-}
+if ! list_named | grep -qx -- "$TARGET"; then
+  ALIASED=$(by_alias "$TARGET")
+  [ -n "$ALIASED" ] && TARGET="$ALIASED"
+fi
+if ! list_named | grep -qx -- "$TARGET"; then
+  MATCHES=$(list_named | grep -- "$TARGET")
+  COUNT=$(printf "%s" "$MATCHES" | grep -c . )
+  if [ "$COUNT" -eq 1 ]; then
+    TARGET="$MATCHES"
+  elif [ "$COUNT" -eq 0 ]; then
+    printf "%sno profile matches '%s'%s\n" "$red" "$1" "$rst" >&2
+    printf "available: %s\n" "$(list_named | tr '\n' ' ')" >&2
+    exit 1
+  else
+    # Several names match. Prefer a single IAM Identity Center profile, so short
+    # names keep working while key or role profiles for the same account still exist.
+    SSO_MATCHES=""
+    for m in $MATCHES; do
+      [ "$(kind_of "$m")" = "sso" ] && SSO_MATCHES="$SSO_MATCHES $m"
+    done
+    set -- $SSO_MATCHES
+    if [ "$#" -eq 1 ]; then
+      TARGET="$1"
+    else
+      printf "%s'%s' matches more than one profile:%s\n" "$red" "$TARGET" "$rst" >&2
+      printf "  %s\n" $MATCHES >&2
+      exit 1
+    fi
+  fi
+fi
 
-KEY=$(key_of "$TARGET")
-SEC=$(aws configure get aws_secret_access_key --profile "$TARGET" 2>/dev/null)
-[ -n "$KEY" ] && [ -n "$SEC" ] || die "profile '$TARGET' has no access keys (SSO/role profiles aren't supported)"
+REGION=$(get "$TARGET" region); [ -n "$REGION" ] || REGION=$(get default region); [ -n "$REGION" ] || REGION="us-east-1"
+OUTPUT=$(get "$TARGET" output); [ -n "$OUTPUT" ] || OUTPUT="json"
 
-REGION=$(aws configure get region --profile "$TARGET" 2>/dev/null || echo us-east-1)
-OUTPUT=$(aws configure get output --profile "$TARGET" 2>/dev/null || echo json)
+write_default "$TARGET" "$REGION" "$OUTPUT" || die "could not write $CONF"
 
-cp "$CRED" "$CRED.bak-awsp"
-aws configure set aws_access_key_id     "$KEY"    --profile default
-aws configure set aws_secret_access_key "$SEC"    --profile default
-aws configure set region                "$REGION" --profile default
-aws configure set output                "${OUTPUT:-json}" --profile default
-unset KEY SEC
-
-IDENT=$(aws sts get-caller-identity --output text --query '[Account,Arn]' 2>&1)
+printf "%sdefault -> %s%s  %s %s\n" "$grn" "$TARGET" "$rst" "$(kind_of "$TARGET")" "$(acct_of "$TARGET")"
+IDENT=$(identity)
 case "$IDENT" in
-  *rror*|*nable*) printf "%sswitched, but the credentials do not work:%s\n  %s\n" "$red" "$rst" "$IDENT" >&2; exit 1 ;;
+  *rror*|*xpired*|*nable*|*ailed*)
+      printf "  %s%s%s\n" "$ylw" "$(printf '%s' "$IDENT" | head -2 | tr '\n' ' ')" "$rst"
+      printf "  %srun '%s --login' to sign in, then any command hits this account%s\n" "$dim" "$SELF" "$rst" ;;
+  *)  printf "  %s\n" "$IDENT" ;;
 esac
-printf "%sdefault -> %s%s   %s\n" "$grn" "$TARGET" "$rst" \
-  "$(echo "$IDENT" | sed 's|arn:aws:iam::[0-9]*:user/| |')"
-[ -n "${AWS_PROFILE:-}" ] && printf "%s! AWS_PROFILE=%s is set here and overrides this — run 'unset AWS_PROFILE'%s\n" \
-  "$ylw" "$AWS_PROFILE" "$rst"
+warn_shadow
 exit 0
